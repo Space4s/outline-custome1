@@ -1,193 +1,72 @@
-name: CI
+name: Docker
 
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-
 env:
-  NODE_ENV: test
-  DATABASE_URL: postgres://postgres:password@localhost:5432/outline_test
-  REDIS_URL: redis://127.0.0.1:6379
-  URL: http://localhost:3000
-  NODE_OPTIONS: --max-old-space-size=8192
-  SECRET_KEY: F0E5AD933D7F6FD8F4DBB3E038C501C052DC0593C686D21ACB30AE205D2F634B
-  UTILS_SECRET: 123456
-  SLACK_VERIFICATION_TOKEN: 123456
-  SMTP_USERNAME: localhost
+  IMAGE_NAME: fefuboard/outline-ru
+  BASE_IMAGE_NAME: fefuboard/outline-base
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
+  build-amd:
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
-      - name: Enable Corepack
-        run: corepack enable
-      - name: Use Node.js 24.x
-        uses: actions/setup-node@v5
-        with:
-          node-version: 24.x
-          cache: "yarn"
-      - name: Cache node_modules
-        id: cache-node-modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-modules-24.x-${{ hashFiles('yarn.lock') }}
-      - name: Install dependencies
-        if: steps.cache-node-modules.outputs.cache-hit != 'true'
-        run: yarn install --immutable
+      - name: Checkout
+        uses: actions/checkout@v5
 
-  lint:
-    needs: setup
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Enable Corepack
-        run: corepack enable
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24.x
-          cache: "yarn"
-      - name: Restore node_modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-modules-24.x-${{ hashFiles('yarn.lock') }}
-      - run: yarn lint --quiet
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-  types:
-    needs: setup
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Enable Corepack
-        run: corepack enable
-      - uses: actions/setup-node@v5
+      - name: Docker base meta
+        id: base_meta
+        uses: docker/metadata-action@v5
         with:
-          node-version: 24.x
-          cache: "yarn"
-      - name: Restore node_modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-modules-24.x-${{ hashFiles('yarn.lock') }}
-      - run: yarn tsc
+          images: |
+            ${{ env.BASE_IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
 
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      config: ${{ steps.filter.outputs.config }}
-      server: ${{ steps.filter.outputs.server }}
-      app: ${{ steps.filter.outputs.app }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dorny/paths-filter@v2
-        id: filter
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
         with:
-          filters: |
-            config:
-              - '.github/**'
-              - 'vite.config.ts'
-            server:
-              - 'server/**'
-              - 'shared/**'
-              - 'package.json'
-              - 'yarn.lock'
-            app:
-              - 'app/**'
-              - 'shared/**'
-              - 'package.json'
-              - 'yarn.lock'
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  test:
-    needs: [setup, changes]
-    if: ${{ needs.changes.outputs.app == 'true' || needs.changes.outputs.config == 'true' }}
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        test-group: [app, shared]
-    steps:
-      - uses: actions/checkout@v5
-      - name: Enable Corepack
-        run: corepack enable
-      - uses: actions/setup-node@v5
+      - name: Build and push base image
+        id: base_build
+        uses: docker/build-push-action@v6
         with:
-          node-version: 24.x
-          cache: "yarn"
-      - name: Restore node_modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-modules-24.x-${{ hashFiles('yarn.lock') }}
-      - run: yarn test:${{ matrix.test-group }}
+          context: .
+          file: Dockerfile.base
+          labels: ${{ steps.base_meta.outputs.labels }}
+          tags: ${{ steps.base_meta.outputs.tags }}
+          push: true
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          pull: false
 
-  test-server:
-    needs: [setup, changes]
-    if: ${{ needs.changes.outputs.server == 'true' || needs.changes.outputs.config == 'true' }}
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:14.2
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: password
-          POSTGRES_DB: outline_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
 
-    strategy:
-      matrix:
-        shard: [1, 2, 3, 4]
-
-    steps:
-      - uses: actions/checkout@v5
-      - name: Enable Corepack
-        run: corepack enable
-      - uses: actions/setup-node@v5
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
         with:
-          node-version: 24.x
-          cache: "yarn"
-      - name: Restore node_modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-modules-24.x-${{ hashFiles('yarn.lock') }}
-      - run: yarn sequelize db:migrate
-      - name: Run server tests
-        run: |
-          TESTFILES=$(find . -name "*.test.ts" -path "*/server/*" | sort | awk "NR % 4 == (${{ matrix.shard }} - 1)")
-          yarn test --maxWorkers=2 $TESTFILES
-
-  bundle-size:
-    needs: [setup, types, changes]
-    if: ${{ (needs.changes.outputs.app == 'true' || needs.changes.outputs.config == 'true') && github.repository == 'outline/outline' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Enable Corepack
-        run: corepack enable
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24.x
-          cache: "yarn"
-      - name: Restore node_modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-modules-24.x-${{ hashFiles('yarn.lock') }}
-      - name: Set environment to production
-        run: echo "NODE_ENV=production" >> $GITHUB_ENV
-      - run: yarn vite:build
-      - name: Send bundle stats to RelativeCI
-        uses: relative-ci/agent-action@v2
-        with:
-          key: ${{ secrets.RELATIVE_CI_KEY }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          webpackStatsFile: ./build/app/webpack-stats.json
+          context: .
+          file: Dockerfile
+          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          push: true
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          pull: false
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_IMAGE_NAME }}@${{ steps.base_build.outputs.digest }}
